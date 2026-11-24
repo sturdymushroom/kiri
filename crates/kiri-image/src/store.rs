@@ -138,6 +138,35 @@ impl Image {
 #[derive(Debug)]
 pub struct Store {
     root: PathBuf,
+    /// The last index parsed, with the mtime and length its file had, so an
+    /// unchanged file skips the re-read and re-parse (the index is replaced
+    /// whole by rename, so both together identify the content).
+    index_cache: Mutex<Option<CachedIndex>>,
+}
+
+/// A parsed index keyed to its file's identity, see [`Store::index_cache`].
+#[derive(Debug)]
+struct CachedIndex {
+    signature: Option<(std::time::SystemTime, u64)>,
+    images: Vec<Image>,
+}
+
+/// The file identity a cache entry is checked against.
+fn identity(path: &Path) -> Option<(std::time::SystemTime, u64)> {
+    let m = fs::metadata(path).ok()?;
+    Some((m.modified().ok()?, m.len()))
+}
+
+/// The parsed images still worth reusing: only when the file on disk still
+/// carries the signature that was cached with it.
+fn cached_index(
+    cache: &Mutex<Option<CachedIndex>>,
+    file: &Option<(std::time::SystemTime, u64)>,
+) -> Option<Vec<Image>> {
+    let sig = file.as_ref()?;
+    let guard = cache.lock().ok()?;
+    let cached = guard.as_ref()?;
+    (cached.signature.as_ref() == Some(sig)).then(|| cached.images.clone())
 }
 
 static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
@@ -304,7 +333,7 @@ impl Store {
         if !tmp.is_dir() {
             fs::create_dir_all(tmp)?;
         }
-        Ok(Store { root })
+        Ok(Store { root, index_cache: Mutex::new(None) })
     }
 
     pub fn root(&self) -> &Path {
@@ -354,9 +383,23 @@ impl Store {
 
     /// The image index. One that does not parse is repaired first, see
     /// [`Store::recover`], rather than failing every caller from then on.
+    /// A repeat read of an unchanged file reuses the last parse: every
+    /// container create reads the index, and callers far outnumber writers.
     pub fn images(&self) -> io::Result<Vec<Image>> {
+        let path = self.root.join("images.json");
+        let id = identity(&path);
+        if let Some(images) = cached_index(&self.index_cache, &id) {
+            return Ok(images);
+        }
         match self.read_index()? {
-            Index::Valid(images) => Ok(images),
+            Index::Valid(images) => {
+                // Cache only a parse the file survived unchanged, so a write
+                // mid-read is never taken for the content that was parsed.
+                if let Some(mut cache) = self.index_cache.lock().ok().filter(|_| identity(&path) == id) {
+                    *cache = id.map(|sig| CachedIndex { signature: Some(sig), images: images.clone() });
+                }
+                Ok(images)
+            }
             Index::Corrupt(..) => {
                 let _lock = self.lock_index()?;
                 self.read_locked()
@@ -1101,5 +1144,51 @@ mod tests {
         assert_eq!(fs::read(&path).unwrap(), data);
 
         fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// A cached read serves the same images, and still sees every write the
+    /// store makes and every external change to `images.json`.
+    #[test]
+    fn the_index_read_cache_serves_unchanged_reads_and_sees_every_change() {
+        let root = std::env::temp_dir().join(format!("kiri-store-cache-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let store = Store::open(&root).unwrap();
+        store.put_image(fixture_image(&root, "a:1")).unwrap();
+        let first = store.images().unwrap();
+        assert_eq!(first.len(), 1);
+        assert_eq!(store.images().unwrap(), first, "an unchanged file rereads the same index");
+
+        sleep_a_moment();
+        store.put_image(fixture_image(&root, "b:1")).unwrap();
+        let names: Vec<String> = store.images().unwrap().into_iter().map(|i| i.name).collect();
+        assert_eq!(names, ["a:1", "b:1"], "the store's own write is not masked by the cache");
+
+        sleep_a_moment();
+        fs::remove_file(root.join("images.json")).unwrap();
+        assert!(store.images().unwrap().is_empty(), "an external deletion is not masked by the cache");
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    fn fixture_image(root: &Path, name: &str) -> Image {
+        let mut ingest = Store::open(root).unwrap().ingest().unwrap();
+        ingest.write_all(b"a layer").unwrap();
+        let (layer, size) = ingest.finish().unwrap();
+        Image {
+            mirror: None,
+            name: name.into(),
+            digest: "sha256:manifest".into(),
+            index_digest: None,
+            config_digest: format!("sha256:{}", "3".repeat(64)),
+            layers: vec![Layer { digest: layer, size, media_type: "application/vnd.oci.image.layer.v1.tar".into() }],
+            size,
+            platform: "linux/amd64".into(),
+            created: String::new(),
+            pulled_at: 0,
+            config: RunConfig::default(),
+        }
+    }
+
+    fn sleep_a_moment() {
+        std::thread::sleep(std::time::Duration::from_millis(20));
     }
 }

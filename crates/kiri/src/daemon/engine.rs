@@ -1313,8 +1313,8 @@ fn read_records(path: &std::path::Path) -> io::Result<Records> {
 /// whether a monitor thread is probing. `epoch` changes whenever the monitor
 /// should stop, so a thread that sees a different one quits.
 #[derive(Debug, Default)]
-struct HealthRun {
-    health: super::health::Health,
+pub(crate) struct HealthRun {
+    pub(crate) health: super::health::Health,
     epoch: u64,
     monitoring: bool,
 }
@@ -5662,13 +5662,17 @@ impl Engine {
         self.lock().containers.values().filter_map(&mut f).collect()
     }
 
-    /// Runs `f` over every container alongside the current networks slice,
-    /// locking container state before networks.
-    pub fn each_with_networks<T>(&self, mut f: impl FnMut(&Container, &[super::network::Network]) -> Option<T>) -> Vec<T> {
+    /// Runs `f` over every container with the networks slice and the health
+    /// map, both borrowed, so `docker ps` clones neither per request. Locks
+    /// container state before networks.
+    pub(crate) fn each_with_networks_health<T>(
+        &self,
+        mut f: impl FnMut(&Container, &[super::network::Network], &HashMap<String, HealthRun>) -> Option<T>,
+    ) -> Vec<T> {
         let s = self.lock();
         let net = self.lock_net();
         let networks = net.all();
-        s.containers.values().filter_map(|c| f(c, networks)).collect()
+        s.containers.values().filter_map(|c| f(c, networks, &s.health)).collect()
     }
 
     pub fn with<T>(&self, key: &str, f: impl FnOnce(&Container) -> T) -> Result<T, Error> {
@@ -6507,11 +6511,6 @@ impl Engine {
     /// `State.Health` of a container with a healthcheck.
     pub fn health(&self, id: &str) -> Option<super::health::Health> {
         self.lock().health.get(id).map(|h| h.health.clone())
-    }
-
-    /// Health status by container id, for `docker ps`.
-    pub fn health_statuses(&self) -> HashMap<String, super::health::Health> {
-        self.lock().health.iter().map(|(id, h)| (id.clone(), h.health.clone())).collect()
     }
 
     /// Docker's `initHealthMonitor` at every start: status back to

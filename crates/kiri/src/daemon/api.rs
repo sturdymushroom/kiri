@@ -2220,7 +2220,7 @@ fn volume_json(v: &super::volumes::Volume) -> Value {
         "Driver": "local",
         "Mountpoint": super::volumes::guest_path(&v.name),
         "CreatedAt": time::rfc3339(std::time::UNIX_EPOCH + Duration::from_nanos(v.created_ns)),
-        "Labels": if v.labels.is_object() { v.labels.clone() } else { json!({}) },
+        "Labels": labels_or_empty(&v.labels),
         "Scope": "local",
         "Options": v.options,
     })
@@ -3187,6 +3187,10 @@ fn spec_wsl_distro(spec: &super::engine::Spec) -> Option<String> {
     None
 }
 
+fn labels_or_empty(labels: &serde_json::Value) -> serde_json::Value {
+    if labels.is_object() { labels.clone() } else { json!({}) }
+}
+
 fn list(req: &Request, engine: &Engine) -> Result<Value, Error> {
     let f = filters(req, &["id", "name", "label", "label!", "status", "ancestor", "network", "exited", "volume", "health"])?;
     if let Some(bad) = f.values("health").and_then(|v| v.iter().find(|v| !super::health::valid_filter(v))) {
@@ -3201,7 +3205,6 @@ fn list(req: &Request, engine: &Engine) -> Result<Value, Error> {
         }
         None => None,
     };
-    let health = engine.health_statuses();
     // Docker matches the image each `ancestor` value names, by ID (#442).
     let ancestors = f.values("ancestor").map(|v| engine.ancestor_ids(v)).transpose()?;
     // A status filter or a limit lists stopped containers without --all, as Docker does.
@@ -3209,11 +3212,11 @@ fn list(req: &Request, engine: &Engine) -> Result<Value, Error> {
         || limit.is_some()
         || f.values("status").is_some()
         || f.values("exited").is_some();
-    let mut rows = engine.each_with_networks(|c, networks| {
+    let mut rows = engine.each_with_networks_health(|c, networks, health| {
         if !all && c.status != Status::Running {
             return None;
         }
-        let labels = if c.spec.labels.is_object() { c.spec.labels.clone() } else { json!({}) };
+        let labels = labels_or_empty(&c.spec.labels);
         let first = (!c.spec.left_all_networks)
             .then(|| networks.iter().find(|n| n.name == c.spec.network_mode || n.id == c.spec.network_mode || (c.spec.network_mode == "default" && n.name == "bridge")))
             .flatten();
@@ -3228,7 +3231,7 @@ fn list(req: &Request, engine: &Engine) -> Result<Value, Error> {
                     || c.spec.extra_networks.iter().any(|x| networks.iter().find(|n| n.name == x.name).is_some_and(|n| n.name == v || n.id.starts_with(v)))
             })
             && f.any("volume", |v| c.spec.volumes.iter().chain(&c.spec.anon_volumes).any(|n| n == v) || c.spec.mount_info.iter().any(|m| m["Destination"] == v || m["Source"] == v))
-            && f.any("health", |v| v == health.get(&c.id).map_or("none", |h| h.status.as_str()));
+            && f.any("health", |v| v == health.get(&c.id).map_or("none", |h| h.health.status.as_str()));
         if !keep {
             return None;
         }
@@ -3240,7 +3243,7 @@ fn list(req: &Request, engine: &Engine) -> Result<Value, Error> {
             "Command": c.argv().join(" "),
             "Created": time::unix(c.created),
             "State": state_word(c),
-            "Status": ps_status(c, health.get(&c.id)),
+            "Status": ps_status(c, health.get(&c.id).map(|h| &h.health)),
             // Kiri's own: the window counts "Up 3 s" from these every second.
             // Docker clients ignore fields they don't know.
             "KiriStartedAt": c.started.map(time::unix),
@@ -3249,7 +3252,7 @@ fn list(req: &Request, engine: &Engine) -> Result<Value, Error> {
             "KiriOOMKilled": c.oom_killed,
             "KiriVmStopped": c.vm_stopped,
             "Ports": ports_list(c),
-            "Labels": if c.spec.labels.is_object() { c.spec.labels.clone() } else { json!({}) },
+            "Labels": labels,
             "HostConfig": {"NetworkMode": c.spec.network_mode},
             "NetworkSettings": {"Networks": endpoints(c, networks)},
             "Mounts": c.spec.mount_info,
@@ -3309,7 +3312,7 @@ fn inspect(c: &Container, nets: &[super::network::Network], anon_vols: &[String]
             "OpenStdin": c.spec.open_stdin,
             "AttachStdout": true,
             "AttachStderr": true,
-            "Labels": if c.spec.labels.is_object() { c.spec.labels.clone() } else { json!({}) },
+            "Labels": labels_or_empty(&c.spec.labels),
             "ExposedPorts": inspect_exposed(&c.spec.ports, &c.spec.exposed),
         },
         "HostConfig": {
@@ -3467,12 +3470,12 @@ fn network_json(engine: &Engine, n: &super::network::Network, with_members: bool
         "ConfigOnly": false,
         "Containers": containers,
         "Options": super::network::shown_options(n),
-        "Labels": if n.labels.is_object() { n.labels.clone() } else { json!({}) },
+        "Labels": labels_or_empty(&n.labels),
     })
 }
 
 fn network_matches(f: &Filters, engine: &Engine, n: &super::network::Network) -> bool {
-    let labels = if n.labels.is_object() { n.labels.clone() } else { json!({}) };
+    let labels = labels_or_empty(&n.labels);
     f.name(&n.name)
         && f.network_id(&n.id)
         && f.any("driver", |v| v == n.driver)
