@@ -18,3 +18,7 @@
 CLAUDE.md
 CLAUDE.local.md
 .claude/
+
+# Machine-local noise
+.DS_Store
+__pycache__/

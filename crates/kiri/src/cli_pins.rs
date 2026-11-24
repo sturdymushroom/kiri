@@ -123,14 +123,23 @@ pub const LINUX_DOCKER_CLI: (&str, &str) = ("29.9.2", "9ac225999fd5e863f7694c728
 pub const LINUX_COMPOSE: (&str, &str) = ("v5.8.0", "b8840f5008c447f41fce0a57ae3adeab42c89b1eb6e6012524bcabbfb4ffbaf6");
 pub const LINUX_BUILDX: (&str, &str) = ("v0.38.1", "e25d5cd675092bb5d1d03632fdc46cdf3fede7b514dc5f023a105e00d3ce5ad4");
 
+/// Kept for tools that build the same URLs from the same pins
+/// (`packaging/linux/fetch-cli.sh`); no Rust consumer calls this.
+#[allow(dead_code)]
 pub fn linux_docker_url(v: &str) -> String {
     format!("https://download.docker.com/linux/static/stable/x86_64/docker-{v}.tgz")
 }
 
+/// Kept for tools that build the same URLs from the same pins
+/// (`packaging/linux/fetch-cli.sh`); no Rust consumer calls this.
+#[allow(dead_code)]
 pub fn linux_compose_url(v: &str) -> String {
     format!("https://github.com/docker/compose/releases/download/{v}/docker-compose-linux-x86_64")
 }
 
+/// Kept for tools that build the same URLs from the same pins
+/// (`packaging/linux/fetch-cli.sh`); no Rust consumer calls this.
+#[allow(dead_code)]
 pub fn linux_buildx_url(v: &str) -> String {
     format!("https://github.com/docker/buildx/releases/download/{v}/buildx-{v}.linux-amd64")
 }
